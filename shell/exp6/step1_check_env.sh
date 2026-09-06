@@ -12,9 +12,18 @@ echo "==> (1) 检查 root 权限"
 echo "==> (2) 检查基础软件工具（本实验额外要求 nping）"
 ip -V || exit 1
 for cmd in wireshark tshark ncat nping traceroute ethtool; do
-    command -v "$cmd" >/dev/null && echo "    $cmd ✓" || { echo "    [错误] $cmd 未安装（nping/ncat 属 nmap 包）" >&2; MISS=1; }
+    if command -v "$cmd" >/dev/null; then
+        echo "    $cmd ✓"
+    else
+        echo "    [错误] $cmd 未安装（openEuler: dnf install wireshark nmap traceroute ethtool；nping/ncat 属 nmap 包）" >&2
+        MISS=1
+    fi
 done
-[ -n "${MISS:-}" ] && exit 1
+if [ -n "${MISS:-}" ]; then
+    echo "==> 环境检查存在失败项，先修复再进入步骤2 ✗" >&2
+    exit 1
+fi
+echo "==> 基础软件工具检查通过 ✓"
 
 echo "==> (3) 检查防火墙状态"
 if systemctl is-active firewalld >/dev/null 2>&1; then
@@ -24,8 +33,22 @@ else
 fi
 
 echo "==> (4) 内核虚拟网络能力"
-modinfo veth   >/dev/null 2>&1 && echo "    veth ✓"
-modinfo bridge >/dev/null 2>&1 && echo "    bridge ✓"
+# modinfo 只证明模块文件存在（内建模块或未装 kernel-devel 时会误报）
+if modinfo veth >/dev/null 2>&1; then
+    echo "    veth 模块 ✓"
+else
+    echo "    [警告] veth 模块元数据不可读（可能为内建或缺 kernel-devel，若 create 失败需回查）" >&2
+    MISS=1
+fi
+if modinfo bridge >/dev/null 2>&1; then
+    echo "    bridge 模块 ✓"
+else
+    echo "    [警告] bridge 模块元数据不可读（内建或缺 kernel-devel，需回查）" >&2
+    MISS=1
+fi
+
+[ -n "${MISS:-}" ] && { echo "==> 内核模块检查未完全通过（可能是内建模块，若 create 失败需回查）" >&2; exit 1; }
+echo "==> 环境检查全部通过 ✓"
 
 # ------------------------------------------------------------
 # 预期实验现象:

@@ -8,7 +8,7 @@ set -euo pipefail
 NS_H56A="H56A"
 
 [ "$(id -u)" -eq 0 ] || { echo "[错误] 请使用 sudo 执行" >&2; exit 1; }
-ip netns list | grep -q "$NS_H56A" || { echo "[错误] 拓扑未创建，先运行 create_topology.sh create" >&2; exit 1; }
+ip netns list | grep -qw "$NS_H56A" || { echo "[错误] 拓扑未创建，先运行 create_topology.sh create" >&2; exit 1; }
 
 # 目标主机 -> 预期途经路由器（按拓扑规划）
 declare -A TARGETS=(
@@ -23,7 +23,7 @@ for dst in 192.168.57.126 192.168.57.190 192.168.57.254; do
     echo "=========================================================="
     echo "==> traceroute -n $dst （目标: $host）"
     echo "----------------------------------------------------------"
-    ip netns exec "$NS_H56A" traceroute -n -w 2 -q 1 -m 8 "$dst" 2>/dev/null || true
+    ip netns exec "$NS_H56A" traceroute -n -w 2 -q 1 -m 8 "$dst" || true
 
     echo ""
     echo "==> 途经路由器路由表（等价指导书 ip route / routel）"
@@ -31,7 +31,9 @@ for dst in 192.168.57.126 192.168.57.190 192.168.57.254; do
         echo "--- 路由器 $r 的路由表 (ip route) ---"
         ip netns exec "$r" ip route
         echo "--- 路由器 $r 的路由表 (routel 格式) ---"
-        ip netns exec "$r" routel 2>/dev/null | head -8 || ip netns exec "$r" ip route | head -8
+        # 不用 `routel | head`（pipefail 下 head 提前关闭管道会使 routel 收到
+        # SIGPIPE 而非零退出，误触发 || 分支重复打印 ip route）
+        ip netns exec "$r" routel 2>/dev/null || true
         echo ""
     done
 done

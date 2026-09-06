@@ -59,13 +59,32 @@ IP_H57C="192.168.57.254/26"
 
 [ "$(id -u)" -eq 0 ] || { echo "[错误] 请使用 root/sudo 执行" >&2; exit 1; }
 
-offload_off() { ip netns exec "$1" ethtool -K "$2" rx off tx off gso off tso off gro off 2>/dev/null || true; }
+ns_exists() { ip netns list | grep -qw "$1"; }
+
+offload_off() {
+    # 失败留痕（veth 的 rx off 可能被内核拒绝，属已知限制），不静默吞错
+    if ! ip netns exec "$1" ethtool -K "$2" rx off tx off gso off tso off gro off 2>/dev/null; then
+        echo "[警告] $1.$2 offload 关闭失败（检查 ethtool 是否安装）" >&2
+    fi
+}
 
 do_create() {
+    # 幂等性保护: 若拓扑已存在，先销毁旧拓扑再重建
+    if ns_exists "$NS_H56A" || ns_exists "$NS_SW56A" || ns_exists "$NS_RB" || ns_exists "$NS_RA" \
+       || ns_exists "$NS_RC" || ns_exists "$NS_RD" || ns_exists "$NS_RE" || ns_exists "$NS_SW57A" \
+       || ns_exists "$NS_SW57B" || ns_exists "$NS_SW57C" || ns_exists "$NS_H57A" || ns_exists "$NS_H57B" \
+       || ns_exists "$NS_H57C" || ns_exists "$NS_GW"; then
+        echo "==> 检测到已有同名命名空间，先销毁旧拓扑"
+        do_destroy
+    fi
+    # 创建中途失败时回滚，避免留下半成品状态
+    trap 'echo "[错误] 创建失败，回滚已创建的资源" >&2; do_destroy' ERR
+
     echo "==> 创建 14 个网络命名空间"
     for ns in "$NS_H56A" "$NS_SW56A" "$NS_RB" "$NS_RA" "$NS_RC" "$NS_RD" "$NS_RE" \
               "$NS_SW57A" "$NS_SW57B" "$NS_SW57C" "$NS_H57A" "$NS_H57B" "$NS_H57C" "$NS_GW"; do
         ip netns add "$ns"
+        ip netns exec "$ns" ip link set lo up
     done
 
     echo "==> 创建 4 个网桥（交换机）"
@@ -77,7 +96,7 @@ do_create() {
         ip netns exec "${spec%% *}" ip link set "${spec#* }" up
     done
 
-    echo "==> 创建 13 对 VETH 并迁移"
+    echo "==> 创建 14 对 VETH 并迁移"
     ip link add "$V_H56A"     type veth peer name "$V_SW56A_H56A"
     ip link add "$V_RB_56A"   type veth peer name "$V_SW56A_RB"
     ip link add "$V_RB_RA"    type veth peer name "$V_RA_RB"
@@ -169,23 +188,27 @@ do_create() {
     ip netns exec "$NS_RB" ip route add 192.168.57.128/26 via 192.168.56.246
     ip netns exec "$NS_RB" ip route add 192.168.57.192/26 via 192.168.56.246
     ip netns exec "$NS_RB" ip route add 192.168.99.0/24   via 192.168.56.246
-    # RC: 56/99 网段经 RA；57B/57C 网段经 RE（同网段直连 RE）
-    ip netns exec "$NS_RC" ip route add 192.168.56.0/25    via 192.168.56.249
-    ip netns exec "$NS_RC" ip route add 192.168.99.0/24    via 192.168.56.249
+    # RC: 56/99 网段经 RA（下一跳 = RA 侧地址 .250，不能写本机地址 .249）；
+    #     57B/57C 网段经 RE（同网段直连 RE，下一跳 = RE 侧地址 .125）
+    ip netns exec "$NS_RC" ip route add 192.168.56.0/25    via 192.168.56.250
+    ip netns exec "$NS_RC" ip route add 192.168.99.0/24    via 192.168.56.250
     ip netns exec "$NS_RC" ip route add 192.168.57.128/26  via 192.168.57.125
     ip netns exec "$NS_RC" ip route add 192.168.57.192/26  via 192.168.57.125
-    # RD: 56/99 网段经 RA；57A/57B 网段经 RE（同网段直连 RE）
-    ip netns exec "$NS_RD" ip route add 192.168.56.0/25    via 192.168.56.253
-    ip netns exec "$NS_RD" ip route add 192.168.99.0/24    via 192.168.56.253
+    # RD: 56/99 网段经 RA（下一跳 = RA 侧地址 .254，不能写本机地址 .253）；
+    #     57A/57B 网段经 RE（同网段直连 RE，下一跳 = RE 侧地址 .253）
+    ip netns exec "$NS_RD" ip route add 192.168.56.0/25    via 192.168.56.254
+    ip netns exec "$NS_RD" ip route add 192.168.99.0/24    via 192.168.56.254
     ip netns exec "$NS_RD" ip route add 192.168.57.0/25    via 192.168.57.253
     ip netns exec "$NS_RD" ip route add 192.168.57.128/26  via 192.168.57.253
     # RE: 56/99 网段经 RC
     ip netns exec "$NS_RE" ip route add 192.168.56.0/25    via 192.168.57.1
     ip netns exec "$NS_RE" ip route add 192.168.99.0/24    via 192.168.57.1
-    # RA: 57A 网段经 RC；57B/57C 网段经 RD；默认路由指向互联网出口
-    ip netns exec "$NS_RA" ip route add 192.168.57.0/25    via 192.168.56.250
-    ip netns exec "$NS_RA" ip route add 192.168.57.128/26  via 192.168.56.254
-    ip netns exec "$NS_RA" ip route add 192.168.57.192/26  via 192.168.56.254
+    # RA: 57A 网段经 RC（下一跳 = RC 侧地址 .249）；
+    #     57B 网段经 RC（与 step8 宣称的 RB->RA->RC->RE 路径一致，RC 再经 RE 转发）；
+    #     57C 网段经 RD（下一跳 = RD 侧地址 .253）；默认路由指向互联网出口
+    ip netns exec "$NS_RA" ip route add 192.168.57.0/25    via 192.168.56.249
+    ip netns exec "$NS_RA" ip route add 192.168.57.128/26  via 192.168.56.249
+    ip netns exec "$NS_RA" ip route add 192.168.57.192/26  via 192.168.56.253
     ip netns exec "$NS_RA" ip route add default via 192.168.99.1
 
     echo "==> 关闭全部主机/路由器 VETH 的 offload"
@@ -200,14 +223,17 @@ do_create() {
     offload_off "$NS_RE" "$V_RE_57C"
 
     echo "==> 拓扑创建完成"
+    trap - ERR
 }
 
 do_verify() {
+    verify_fail=0
     echo "==> 命名空间列表"; ip netns list
     echo "==> 网桥绑定"
+    # bridge link show 不支持裸设备名过滤（参数被静默忽略），改用 ip link show master
     for spec in "$NS_SW56A $BR_56A" "$NS_SW57A $BR_57A" "$NS_SW57B $BR_57B" "$NS_SW57C $BR_57C"; do
         echo "--- ${spec#* } ---"
-        ip netns exec "${spec%% *}" bridge link show "${spec#* }"
+        ip netns exec "${spec%% *}" ip link show master "${spec#* }"
     done
     echo "==> 各节点地址与路由"
     for ns in "$NS_H56A" "$NS_RB" "$NS_RA" "$NS_RC" "$NS_RD" "$NS_RE" "$NS_H57A" "$NS_H57B" "$NS_H57C" "$NS_GW"; do
@@ -216,12 +242,27 @@ do_verify() {
         ip netns exec "$ns" ip route
     done
     echo "==> 可达性测试（H56A -> H57A / H57B / H57C）"
-    ip netns exec "$NS_H56A" ping -c 2 192.168.57.126
-    ip netns exec "$NS_H56A" ping -c 2 192.168.57.190
-    ip netns exec "$NS_H56A" ping -c 2 192.168.57.254
+    for dst in 192.168.57.126 192.168.57.190 192.168.57.254; do
+        if ip netns exec "$NS_H56A" ping -c 2 "$dst"; then
+            echo "    $dst 可达 ✓"
+        else
+            echo "    $dst 不通 ✗（检查静态路由/下一跳配置）" >&2
+            verify_fail=1
+        fi
+    done
+    [ "$verify_fail" -eq 0 ] && echo "==> 验证全部通过 ✓" || { echo "==> 验证存在失败项 ✗" >&2; exit 1; }
 }
 
 do_destroy() {
+    echo "==> 终止命名空间内的残留进程（ncat/tshark），再删除命名空间"
+    for ns in "$NS_H56A" "$NS_SW56A" "$NS_RB" "$NS_RA" "$NS_RC" "$NS_RD" "$NS_RE" \
+              "$NS_SW57A" "$NS_SW57B" "$NS_SW57C" "$NS_H57A" "$NS_H57B" "$NS_H57C" "$NS_GW"; do
+        if ns_exists "$ns"; then
+            pids=$(ip netns pids "$ns" 2>/dev/null || true)
+            [ -n "$pids" ] && kill $pids 2>/dev/null || true
+        fi
+    done
+    sleep 1
     for ns in "$NS_H56A" "$NS_SW56A" "$NS_RB" "$NS_RA" "$NS_RC" "$NS_RD" "$NS_RE" \
               "$NS_SW57A" "$NS_SW57B" "$NS_SW57C" "$NS_H57A" "$NS_H57B" "$NS_H57C" "$NS_GW"; do
         ip netns del "$ns" 2>/dev/null || true

@@ -13,7 +13,13 @@ IF_RA_RD="ve-RA-RD"          # RA 连接 RD 的接口（指导书示例 ve_RA_RD
 LOSS="${1:-10}"
 
 [ "$(id -u)" -eq 0 ] || { echo "[错误] 请使用 sudo 执行" >&2; exit 1; }
-ip netns list | grep -q "$NS_RA" || { echo "[错误] 拓扑未创建，先运行 create_topology.sh create" >&2; exit 1; }
+ip netns list | grep -qw "$NS_RA" || { echo "[错误] 拓扑未创建，先运行 create_topology.sh create" >&2; exit 1; }
+
+# 参数校验: 非法值直接报错，而不是让 tc 在 set -e 下报晦涩错误
+if ! [[ "$LOSS" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk "BEGIN{exit !($LOSS > 0 && $LOSS <= 100)}"; then
+    echo "[错误] 丢包概率必须是 0 < LOSS <= 100 的数值，当前为: $LOSS" >&2
+    exit 1
+fi
 
 echo "==> 清理旧 qdisc 规则（从未添加过时报 Cannot delete... 错误，可忽略）"
 ip netns exec "$NS_RA" tc qdisc del dev "$IF_RA_RD" root 2>/dev/null || \
@@ -25,7 +31,10 @@ echo "==> 当前 qdisc 规则"
 ip netns exec "$NS_RA" tc qdisc show dev "$IF_RA_RD"
 
 echo "==> 验证: H56A ping H57C 20 个包，观察丢包率"
-ip netns exec "$NS_H56A" ping -c 20 192.168.57.254 | tail -3
+# ping 全丢时返回非零（iputils），pipefail 下会中止脚本——显式容错
+if ! ip netns exec "$NS_H56A" ping -c 20 192.168.57.254 | tail -3; then
+    echo "    [提示] ping 非零退出（20 个包可能全部丢失；仅在高丢包率下属预期）"
+fi
 
 # ------------------------------------------------------------
 # 预期实验现象:

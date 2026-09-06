@@ -15,13 +15,21 @@ DEC="-o tls.keylog_file:$KEYLOG"
 [ -f "$KEYLOG" ] || DEC=""
 
 echo "==> (1) 过滤服务器参与通信的数据包"
-IPV4_ZZU=$(tshark -r "$PCAP" $DEC -Y "http.host == \"www.zzu.edu.cn\"" -T fields -e ip.dst 2>/dev/null | sort -u | grep -v '^$' | head -1)
-IPV6_ZZU=$(tshark -r "$PCAP" $DEC -Y "http.host == \"www.zzu.edu.cn\"" -T fields -e ipv6.dst 2>/dev/null | sort -u | grep -v '^$' | head -1)
+SITE="www.zzu.edu.cn"
+# HTTP/1.1 与 HTTP/2 双兼容（解密后 HTTP/2 的 Host 在 :authority 伪首部）
+HOST_FILTER="(http.host == \"$SITE\") || (http2.header.name == \":authority\" && http2.header.value == \"$SITE\")"
+# 服务器可能有多个 A/AAAA 记录（zzu 为 2+2），全部收集，浏览器可能连到任一 IP
+IPV4_ZZU=$(tshark -r "$PCAP" $DEC -Y "$HOST_FILTER" -T fields -e ip.dst 2>/dev/null | sort -u | grep -v '^$' | tr '\n' ' ' || true)
+IPV6_ZZU=$(tshark -r "$PCAP" $DEC -Y "$HOST_FILTER" -T fields -e ipv6.dst 2>/dev/null | sort -u | grep -v '^$' | tr '\n' ' ' || true)
 echo "    IPv4_zzu=${IPV4_ZZU:-无}  IPv6_zzu=${IPV6_ZZU:-无}"
 
+[ -n "${IPV4_ZZU}${IPV6_ZZU}" ] || { echo "[错误] 未提取到服务器 IP，请检查 keylog 是否有效（重跑 step2）" >&2; exit 1; }
+
+# 括号必须显式加：&& 优先级高于 ||，不加括号时 SYN 条件只作用于最后一个分支
+FILTER="( $(for ip in $IPV4_ZZU; do printf 'ip.addr == %s || ' "$ip"; done; for ip in $IPV6_ZZU; do printf 'ipv6.addr == %s || ' "$ip"; done | sed 's/ || $//') )"
+echo "    过滤器: $FILTER"
+
 echo "==> (2) TCP 会话统计（等价 GUI: 统计->会话->TCP）"
-FILTER="ip.addr == ${IPV4_ZZU:-0.0.0.0}"
-[ -n "$IPV6_ZZU" ] && FILTER="$FILTER || ipv6.addr == $IPV6_ZZU"
 tshark -r "$PCAP" $DEC -q -z "conv,tcp,$FILTER" 2>/dev/null | head -25
 
 echo "==> (3) TCP 并发连接数分析"

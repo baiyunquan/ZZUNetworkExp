@@ -25,9 +25,30 @@ else
 fi
 
 echo "==> (4) 检查内核虚拟网络能力（netns / veth / bridge）"
-ls /proc/self/ns/net >/dev/null 2>&1 && echo "    网络命名空间支持 ✓"
-modinfo veth   >/dev/null 2>&1 && echo "    veth 模块 ✓"
-modinfo bridge >/dev/null 2>&1 && echo "    bridge 模块 ✓"
+# 实测法: ls/modinfo 检查在模块内建或未装 kernel-devel 时会误报，
+# 这里直接实际创建一个探针命名空间 + VETH + 网桥，验证后清理。
+PROBE_NS="__exp1_probe__"
+rm_probe() {
+    ip netns del "$PROBE_NS" 2>/dev/null || true
+    ip link del __probe_veth_a 2>/dev/null || true
+    ip link del __probe_veth_b 2>/dev/null || true
+}
+rm_probe
+probe_ok=1
+ip netns add "$PROBE_NS" 2>/dev/null || probe_ok=0
+[ "$probe_ok" -eq 1 ] && ip link add __probe_veth_a type veth peer name __probe_veth_b 2>/dev/null || probe_ok=0
+[ "$probe_ok" -eq 1 ] && ip link set __probe_veth_a netns "$PROBE_NS" 2>/dev/null || probe_ok=0
+if [ "$probe_ok" -eq 1 ]; then
+    ip netns exec "$PROBE_NS" ip link add __probe_br type bridge 2>/dev/null || probe_ok=0
+fi
+rm_probe
+if [ "$probe_ok" -eq 1 ]; then
+    echo "    网络命名空间 / VETH / 网桥 实测创建全部成功 ✓"
+else
+    echo "    [错误] 内核虚拟网络能力不足（netns/veth/bridge 有一项不可用）" >&2
+    echo "    提示: 内核模块可能内建但被禁用，检查 /proc/config.gz 或 sysctl kernel" >&2
+    exit 1
+fi
 
 echo "==> (5) 检查辅助工具（traceroute / tshark）"
 command -v traceroute >/dev/null && echo "    traceroute ✓" || echo "    [警告] traceroute 未安装"

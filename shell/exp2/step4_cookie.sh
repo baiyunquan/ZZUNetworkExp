@@ -12,18 +12,22 @@ KEYLOG="${2:-myssl.log}"
 DEC="-o tls.keylog_file:$KEYLOG"
 [ -f "$KEYLOG" ] || DEC=""
 
-echo "==> (1) 过滤 http.set_cookie or http.cookie（等价 GUI 显示过滤器）"
+# HTTP/1.1 与 HTTP/2 双兼容的过滤器（解密后 HTTP/2 首部经 http2.header.* 提取）
+SETCOOKIE_FILTER="(http.set_cookie) || (http2.header.name == \"set-cookie\")"
+COOKIE_FILTER="(http.cookie) || (http2.header.name == \"cookie\")"
+
+echo "==> (1) 过滤 set-cookie / cookie 首部行（等价 GUI 显示过滤器）"
 echo "    --- 响应中的 Set-Cookie 首部行（服务器 -> 浏览器）---"
-tshark -r "$PCAP" $DEC -Y "http.set_cookie" -T fields \
-    -e http.response.code -e http.set_cookie 2>/dev/null | head -10 || true
+tshark -r "$PCAP" $DEC -Y "$SETCOOKIE_FILTER" -T fields \
+    -e http.response.code -e http.set_cookie -e http2.header.value 2>/dev/null | head -10 || true
 
 echo "    --- 请求中的 Cookie 首部行（浏览器 -> 服务器）---"
-tshark -r "$PCAP" $DEC -Y "http.cookie" -T fields \
-    -e http.host -e http.cookie 2>/dev/null | head -10 || true
+tshark -r "$PCAP" $DEC -Y "$COOKIE_FILTER" -T fields \
+    -e http.host -e http.cookie -e http2.header.value 2>/dev/null | head -10 || true
 
 echo "==> (2) Cookie 字段解析（名称=值; 属性）"
-tshark -r "$PCAP" $DEC -Y "http.set_cookie" -T fields -e http.set_cookie 2>/dev/null \
-    | tr ';' '\n' | sed 's/^ *//' | sort -u | head -15 || true
+tshark -r "$PCAP" $DEC -Y "$SETCOOKIE_FILTER" -T fields -e http.set_cookie -e http2.header.value 2>/dev/null \
+    | tr ';' '\n' | sed 's/^ *//' | grep -v '^$' | sort -u | head -15 || true
 
 # ------------------------------------------------------------
 # 预期实验现象:

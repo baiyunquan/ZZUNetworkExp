@@ -26,7 +26,7 @@ ip netns exec "$NS_SWA" ip link show
 echo "==> (3) 创建两对 VETH 对等接口"
 ip link add "$VETH_HA" type veth peer name "$VETH_HA_PEER"
 ip link add "$VETH_HB" type veth peer name "$VETH_HB_PEER"
-ip link show | grep -E "^[@0-9]+: ${VETH_HA}|${VETH_HB}" || ip link show
+ip link show | grep -E "^[0-9]+: (veth|ve)" || ip link show
 
 echo "==> (4) 将 VETH 接口迁移到对应命名空间"
 ip link set "$VETH_HA" netns "$NS_HA"
@@ -43,7 +43,8 @@ ip netns exec "$NS_SWA" ip link set "$VETH_HA_PEER" master "$BR"
 ip netns exec "$NS_SWA" ip link set "$VETH_HB_PEER" master "$BR"
 ip netns exec "$NS_SWA" ip link set "$VETH_HA_PEER" up
 ip netns exec "$NS_SWA" ip link set "$VETH_HB_PEER" up
-ip netns exec "$NS_SWA" bridge link show "$BR"
+# 注意: bridge link show 的设备名必须带 dev 关键字，裸写会被静默忽略
+ip netns exec "$NS_SWA" bridge link show dev "$BR"
 
 # ------------------------------------------------------------
 # 预期实验现象:

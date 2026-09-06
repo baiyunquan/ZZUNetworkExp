@@ -6,6 +6,7 @@
 #       默认: ./exp2_https.pcap ./myssl.log（步骤2 的产物）
 # =============================================================
 set -euo pipefail
+SITE="www.zzu.edu.cn"
 PCAP="${1:-exp2_https.pcap}"
 KEYLOG="${2:-myssl.log}"
 [ -f "$PCAP" ] || { echo "[错误] 找不到 $PCAP，请先运行 step2_tls_capture.sh" >&2; exit 1; }
@@ -13,27 +14,44 @@ KEYLOG="${2:-myssl.log}"
 DEC="-o tls.keylog_file:$KEYLOG"
 [ -f "$KEYLOG" ] || DEC=""
 
-echo "==> (1) 过滤 http.host == $SITE（对应显示过滤器，得到服务器 IP）"
-echo "    --- IPv4_zzu（目的 IPv4 地址）---"
-tshark -r "$PCAP" $DEC -Y "http.host == \"$SITE\"" -T fields -e ip.dst 2>/dev/null | sort -u | grep -v '^$' || true
-echo "    --- IPv6_zzu（目的 IPv6 地址）---"
-tshark -r "$PCAP" $DEC -Y "http.host == \"$SITE\"" -T fields -e ipv6.dst 2>/dev/null | sort -u | grep -v '^$' || true
+# HTTP/1.1 与 HTTP/2 双兼容的 Host 过滤（解密后 HTTP/2 的 Host 在 :authority 伪首部）
+HOST_FILTER="(http.host == \"$SITE\") || (http2.header.name == \":authority\" && http2.header.value == \"$SITE\")"
 
-IPV4_ZZU=$(tshark -r "$PCAP" $DEC -Y "http.host == \"$SITE\"" -T fields -e ip.dst 2>/dev/null | sort -u | grep -v '^$' | head -1)
-IPV6_ZZU=$(tshark -r "$PCAP" $DEC -Y "http.host == \"$SITE\"" -T fields -e ipv6.dst 2>/dev/null | sort -u | grep -v '^$' | head -1)
+# 由收集到的全部服务器 IP 构造括号包裹的过滤器
+# （括号必须显式加：&& 优先级高于 ||，否则组合条件语义错误）
+build_filter() {
+    local f=""
+    for ip in $IPV4_ZZU; do f="${f:+$f || }ip.addr == $ip"; done
+    for ip in $IPV6_ZZU; do f="${f:+$f || }ipv6.addr == $ip"; done
+    echo "( $f )"
+}
+
+echo "==> (1) 过滤 Host == $SITE（对应显示过滤器，得到服务器 IP）"
+echo "    --- IPv4_zzu（目的 IPv4 地址）---"
+tshark -r "$PCAP" $DEC -Y "$HOST_FILTER" -T fields -e ip.dst 2>/dev/null | sort -u | grep -v '^$' || true
+echo "    --- IPv6_zzu（目的 IPv6 地址）---"
+tshark -r "$PCAP" $DEC -Y "$HOST_FILTER" -T fields -e ipv6.dst 2>/dev/null | sort -u | grep -v '^$' || true
+
+# 服务器可能有多个 A/AAAA 记录（zzu 为 2+2），全部收集，浏览器可能连到任一 IP
+IPV4_ZZU=$(tshark -r "$PCAP" $DEC -Y "$HOST_FILTER" -T fields -e ip.dst 2>/dev/null | sort -u | grep -v '^$' | tr '\n' ' ' || true)
+IPV6_ZZU=$(tshark -r "$PCAP" $DEC -Y "$HOST_FILTER" -T fields -e ipv6.dst 2>/dev/null | sort -u | grep -v '^$' | tr '\n' ' ' || true)
 echo "    记录: IPv4_zzu=${IPV4_ZZU:-无}  IPv6_zzu=${IPV6_ZZU:-无}"
 
+[ -n "${IPV4_ZZU}${IPV6_ZZU}" ] || { echo "[错误] 未提取到服务器 IP，请检查 keylog 是否有效（重跑 step2）" >&2; exit 1; }
+
 echo "==> (2) 过滤服务器参与通信的所有数据包（ip.addr / ipv6.addr == 服务器IP）"
-FILTER="ip.addr == ${IPV4_ZZU:-0.0.0.0}"
-[ -n "$IPV6_ZZU" ] && FILTER="$FILTER || ipv6.addr == $IPV6_ZZU"
+FILTER=$(build_filter)
+echo "    过滤器: $FILTER"
 tshark -r "$PCAP" $DEC -Y "$FILTER" 2>/dev/null | head -15
 echo "    （仅显示前 15 行，完整列表可用 Wireshark 打开 pcap 复现）"
 
 echo "==> (3) 追踪 HTTP 流（等价 GUI: 右键 -> 追踪流 -> HTTP Stream）"
-STREAMS=$(tshark -r "$PCAP" $DEC -Y "http" -T fields -e tcp.stream 2>/dev/null | sort -un | head -3)
+# 注意：HTTPS 流量的 TCP 原始字节流是密文，follow,tcp 只能看到乱码；
+# 必须用 follow,tls 配合 keylog，才能展示解密后的会话内容
+STREAMS=$(tshark -r "$PCAP" $DEC -Y "(http || http2) && tcp" -T fields -e tcp.stream 2>/dev/null | sort -un | head -3 || true)
 for s in $STREAMS; do
-    echo "    ===== TCP 流 #$s 的 HTTP 会话内容 ====="
-    tshark -r "$PCAP" $DEC -q -z "follow,tcp,ascii,$s" 2>/dev/null | sed -n '1,40p'
+    echo "    ===== TCP 流 #$s 的会话内容（TLS 解密后） ====="
+    tshark -r "$PCAP" $DEC -q -z "follow,tls,ascii,$s" 2>/dev/null | sed -n '1,40p'
 done
 
 # ------------------------------------------------------------

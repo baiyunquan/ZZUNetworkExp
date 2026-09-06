@@ -31,8 +31,22 @@ else
 fi
 
 echo "==> (4) 内核虚拟网络能力"
-modinfo veth   >/dev/null 2>&1 && echo "    veth ✓"
-modinfo bridge >/dev/null 2>&1 && echo "    bridge ✓"
+# modinfo 只证明模块文件存在（内建模块或未装 kernel-devel 时会误报）
+if modinfo veth >/dev/null 2>&1; then
+    echo "    veth 模块 ✓"
+else
+    echo "    [警告] veth 模块元数据不可读（可能为内建或缺 kernel-devel，若 create 失败需回查）" >&2
+    MISS=1
+fi
+if modinfo bridge >/dev/null 2>&1; then
+    echo "    bridge 模块 ✓"
+else
+    echo "    [警告] bridge 模块元数据不可读（内建或缺 kernel-devel，需回查）" >&2
+    MISS=1
+fi
+
+[ -n "${MISS:-}" ] && { echo "==> 环境检查存在失败项，先修复再进入步骤2 ✗" >&2; exit 1; }
+echo "==> 环境检查全部通过 ✓"
 
 # ------------------------------------------------------------
 # 预期实验现象:

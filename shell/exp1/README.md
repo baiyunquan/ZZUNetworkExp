@@ -37,7 +37,7 @@ sudo ./create_topology.sh destroy
 ## 预期实验现象（汇总）
 
 1. **步骤1**：root ✓、`ip -V` 输出版本、`wireshark --version` 输出版本、netns/veth/bridge 三项 ✓。
-2. **步骤2**：`ip netns list` 出现 HA/HB/SWA；SWA 内出现 `br-swa`（up）；主空间出现 4 个 `ve-` 开头 VETH；迁移后各 NS 内接口正确；`bridge link show br-swa` 显示两个接口已绑定且 up。**此时未配 IP，ping 不通属正常。**
+2. **步骤2**：`ip netns list` 出现 HA/HB/SWA；SWA 内出现 `br-swa`（up）；主空间出现 4 个 `ve-` 开头 VETH；迁移后各 NS 内接口正确；`bridge link show dev br-swa`（SWA 内执行）显示两个接口已绑定且 up。**此时未配 IP，ping 不通属正常。**
 3. **步骤3**：接口显示 `inet 192.168.50.1/24`、`192.168.50.2/24`；ping 输出 `2 packets transmitted, 2 received, 0% packet loss`；pcap 中可见 **ARP 请求/应答 + ICMP Echo 请求/应答**。
 4. **步骤4**：接口显示 `inet6 fd00::1:1/64`、`fd00::1:2/64`（另自动生成 fe80 链路本地地址）；ping 通；pcap 中可见 **ICMPv6 NDP（邻居请求/通告，替代 ARP）+ ICMPv6 Echo**。
 5. **步骤5**：`create` 无报错；`verify` 列出全部命名空间/接口/网桥绑定/双栈地址，且两次 ping 打印 `IPv4 连通 ✓`、`IPv6 连通 ✓`；`destroy` 后系统恢复初始状态。

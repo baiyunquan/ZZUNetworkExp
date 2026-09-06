@@ -12,7 +12,7 @@
 | 3 | `step3_netem_loss.sh` | 步骤3 | RA 上挂载 netem 随机丢包（默认 10%，可调）+ ping 验证 |
 | 4 | `step4_tcp_tuning.sh` | 步骤4(3)(4) | 两主机 `tcp_rmem='4096 65536 65536'` + `tcp_sack=0` |
 | 5 | `step7_tcp_transfer.sh` | 步骤5/6/7 | H56A 建 100K 文件 + 抓包 + `ncat` 重定向传输 + 校验 |
-| 6 | `step8_analyze_tcp.sh` | 步骤8 | 超时重传/快重传/重复ACK/部分ACK 识别与统计 |
+| 6 | `step8_analyze_tcp.sh` | 步骤8 | 超时重传/快重传/重复ACK/伪重传统计 + 丢失段前后 ACK 序列观察 |
 
 > 步骤2(3)(4) 的拓扑记录与 offload 检查复用 `shell/exp3/step2_verify_offload.sh`。
 
@@ -23,8 +23,8 @@ cd shell/exp5
 chmod +x *.sh
 
 sudo ./step1_check_env.sh
-sudo ./create_topology.sh create
-sudo ./create_topology.sh verify
+sudo ./create_topology.sh create       # 幂等: 检测到旧拓扑会先自动销毁再重建
+sudo ./create_topology.sh verify       # ping 4 包全通 + traceroute 4 跳
 sudo ./step3_netem_loss.sh 10          # RA 丢包 10%，可改 15/20
 sudo ./step4_tcp_tuning.sh
 sudo ./step7_tcp_transfer.sh           # -> /tmp/exp5_tcp.pcap
@@ -41,7 +41,7 @@ sudo ./create_topology.sh destroy      # 同时清除 netem 规则
    - **超时重传**：与原段相同 seq/len，间隔 ≥ RTO，触发后慢启动；
    - **快重传**：其前必有 ≥3 个重复 ACK，不等 RTO 立即重传，触发后快恢复；
    - **重复 ACK**：数量明显多于重传数（3 个触发 1 次快重传）；
-   - **部分 ACK**：确认号落在已发数据中间，证明接收方中间缺段。
+   - **部分 ACK**：tshark 无现成过滤器直接筛出；step8 的 (3) 节改为"丢失段前后 ACK 序列观察"，对照重传段序号与 ACK 确认号，可见确认号在重传成功后"跳过"丢失段推进的特征。
 
 ## 抓包不理想时的调整（指导书补充说明）
 
@@ -52,7 +52,7 @@ sudo ./step3_netem_loss.sh 20          # 或提高丢包概率后重试
 
 ## 注意事项
 
-- netem 作用于 **RA 出方向**（RA→RD），影响 H56A→H57C 数据流，方向正确才能触发回程 ACK 丢失/数据丢失两类场景。
-- 10% 丢包下 100K 传输偶发较慢（连续丢包触发 RTO），脚本已设 120s 超时兜底。
+- netem 挂在 **RA 的 ve-RA-RD** 接口，只作用于 **RA→RD 出方向**，即只模拟 **H56A→H57C 去程数据段丢失**；H57C→H56A 的回程 ACK 从 `ve-RA-RB` 出方向转发，**不受影响**。如需模拟"回程 ACK 丢失"，需另在 RA 的 `ve-RA-RB` 上执行同样的 `tc qdisc add ... netem loss`。
+- 10% 丢包下 100K 传输偶发较慢（连续丢包触发 RTO），脚本超时已参数化（第 2 个参数，默认 120s）。
 - `tcp_rmem`/`tcp_sack` 仅在命名空间内生效，`destroy` 后随命名空间消失，不影响宿主机。
 - 抓包在 **H56A 的 ve-H56A** 接口（本实验与实验3/4 不同，抓发送端），pcap 可拷回 GUI 分析。

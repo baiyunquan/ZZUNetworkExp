@@ -2,7 +2,7 @@
 
 对应指导书《实验2：HTTP协议探索与分析》各步骤的一键化脚本。
 实验拓扑：本机（客户机）→ 互联网 → 公网 Web 服务器 `www.zzu.edu.cn`。
-需要**公网访问**；抓包脚本需 **sudo**，且浏览器与抓包在同一终端会话（共享 `SSLKEYLOGFILE`）。
+需要**公网访问**；抓包脚本需 **sudo -E**（保留图形环境变量，Firefox 需要），且浏览器与抓包在同一终端会话（共享 `SSLKEYLOGFILE`）。
 
 ## 脚本清单与执行顺序
 
@@ -21,7 +21,7 @@ cd shell/exp2
 chmod +x *.sh
 
 ./step1_check_env.sh                      # 无需 root
-sudo ./step2_tls_capture.sh 15            # 抓包 15 秒，生成 exp2_https.pcap + myssl.log
+sudo -E ./step2_tls_capture.sh 15         # 抓包 15 秒，生成 exp2_https.pcap + myssl.log
 ./step3_filter_trace.sh                   # 后续分析直接读 pcap
 ./step4_cookie.sh
 ./step5_tcp_sessions.sh
@@ -41,12 +41,14 @@ sudo ./step2_tls_capture.sh 15            # 抓包 15 秒，生成 exp2_https.pc
 |---|---|
 | Wireshark 选接口开始捕获 | `tshark -i <出口接口> -w exp2_https.pcap` |
 | 首选项→Protocols→TLS→密钥日志文件 | `tshark -o tls.keylog_file:myssl.log` |
-| 显示过滤器 `http.host == www.zzu.edu.cn` | `-Y "http.host == ..."` |
-| 右键→追踪流→HTTP Stream | `-q -z follow,tcp,ascii,<流号>` |
+| 显示过滤器 `http.host == www.zzu.edu.cn` | `-Y "http.host == ... or http2 :authority == ..."`（HTTP/1.1 与 HTTP/2 双兼容） |
+| 右键→追踪流→HTTP Stream | `-q -z follow,tls,ascii,<流号>`（HTTPS 流必须追 TLS 层，`follow,tcp` 只能得到密文） |
 | 统计→会话→TCP 标签页 | `-q -z conv,tcp,<过滤>` |
 
 ## 注意事项
 
 - **必须先关闭已运行的 Firefox** 再跑步骤2，否则旧实例不读取新的 `SSLKEYLOGFILE`（脚本已用独立 profile + `--no-remote` 规避，但仍建议关闭旧实例）。
+- 步骤2 抓包必须**先启动 tshark、后启动 Firefox**（脚本已保证顺序），否则 DNS/TCP/TLS 握手与首次请求不会被抓到。
+- zzu 默认走 **HTTP/2 over TLS**：步骤2/3/4 的过滤与字段提取均已做 HTTP/1.1 / HTTP/2 双兼容；若 GUI Wireshark 中看不到 `http.*` 字段，请展开 TLS 下的 `HTTP2` 层查看。
 - 若站点未使用 Cookie 或抓包太短，步骤4 可能无输出，可重跑步骤2 并在 Firefox 中多点击几个页面。
 - IPv6 不可达的网络属"IPv4 单栈场景"，步骤1 中 IPv6 测试失败是正常现象。

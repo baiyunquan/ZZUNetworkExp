@@ -8,18 +8,22 @@
 set -u
 
 NS_H56A="H56A"; NS_H57C="H57C"; NS_RB="RB"; NS_RA="RA"; NS_RD="RD"
-V_H56A="ve-H56A"; V_H57C="ve-H57C"
+NS_SW56A="SW56A"; NS_SW57C="SW57C"
 
 echo "================ 实验3 拓扑信息记录表 ================"
-for ns in "$NS_H56A" "$NS_H57C" "$NS_RB" "$NS_RA" "$NS_RD"; do
+for ns in "$NS_H56A" "$NS_H57C" "$NS_RB" "$NS_RA" "$NS_RD" "$NS_SW56A" "$NS_SW57C"; do
     echo ""
     echo "### 命名空间: $ns"
-    ip netns exec "$ns" ip -o link show 2>/dev/null | grep -v " lo " | while IFS= read -r line; do
-        ifname=$(echo "$line" | cut -d: -f2 | tr -d ' ')
+    # 注意: 必须用 ': lo:' 过滤（ip -o 输出格式是 "N: lo:"，" lo " 匹配不到）；
+    #       ifname 必须剥掉 VETH 的 @peer 后缀，否则 ip addr show dev 会失败
+    ip netns exec "$ns" ip -o link show 2>/dev/null | grep -vE ': lo:' | while IFS= read -r line; do
+        ifname=$(echo "$line" | cut -d: -f2 | cut -d@ -f1 | tr -d ' ')
         mac=$(echo "$line" | grep -oE 'link/ether [0-9a-f:]+' | awk '{print $2}')
         echo "  接口: $ifname    MAC: ${mac:-无}"
-        ip netns exec "$ns" ip -o addr show dev "$ifname" 2>/dev/null \
-            | grep -oE 'inet [0-9a-fA-F:./]+' | sed 's/^/    IP: /'
+        if ! ip netns exec "$ns" ip -o addr show dev "$ifname" 2>/dev/null \
+            | grep -oE 'inet [0-9a-fA-F:./]+' | sed 's/^/    IP: /'; then
+            echo "    IP: （未配置或查询失败）"
+        fi
     done
 done
 cat <<'EOF'
@@ -36,20 +40,41 @@ cat <<'EOF'
 ==> offload 状态检查（要求 rx/tx-checksumming、generic-segmentation-offload 为 off）
 EOF
 check_offload() {
-    local ns="$1" ifname="$2"
+    local ns="$1" ifname="$2" bad=0
     echo "--- $ns.$ifname ---"
-    ip netns exec "$ns" ethtool -k "$ifname" 2>/dev/null \
-        | grep -E "^(rx-checksumming|tx-checksumming|generic-segmentation-offload|generic-receive-offload)" \
-        | sed 's/^/    /'
+    # 命名空间/接口不存在时报错而非静默输出空表
+    if ! ip netns exec "$ns" ethtool -k "$ifname" 2>/dev/null > /tmp/.exp3_offload.$$; then
+        echo "    [错误] 无法读取 $ns.$ifname 的 offload 状态（拓扑未创建或 ethtool 未安装）" >&2
+        rm -f /tmp/.exp3_offload.$$
+        return 1
+    fi
+    while IFS= read -r l; do
+        echo "    $l"
+        case "$l" in *": on") bad=1 ;; esac
+    done < <(grep -E "^(rx-checksumming|tx-checksumming|generic-segmentation-offload|generic-receive-offload)" /tmp/.exp3_offload.$$)
+    rm -f /tmp/.exp3_offload.$$
+    if [ "$bad" -eq 1 ]; then
+        echo "    [失败] $ns.$ifname 存在未关闭的 offload ✗" >&2
+        return 1
+    fi
+    return 0
 }
-check_offload "$NS_H56A" "$V_H56A"
-check_offload "$NS_H57C" "$V_H57C"
-check_offload "$NS_RB"   "ve-RB-SW56A"
-check_offload "$NS_RB"   "ve-RB-RA"
-check_offload "$NS_RA"   "ve-RA-RB"
-check_offload "$NS_RA"   "ve-RA-RD"
-check_offload "$NS_RD"   "ve-RD-RA"
-check_offload "$NS_RD"   "ve-RD-SW57C"
+VERIFY_FAIL=0
+check_offload "$NS_H56A" "$V_H56A"      || VERIFY_FAIL=1
+check_offload "$NS_H57C" "$V_H57C"      || VERIFY_FAIL=1
+check_offload "$NS_RB"   "ve-RB-SW56A"  || VERIFY_FAIL=1
+check_offload "$NS_RB"   "ve-RB-RA"     || VERIFY_FAIL=1
+check_offload "$NS_RA"   "ve-RA-RB"     || VERIFY_FAIL=1
+check_offload "$NS_RA"   "ve-RA-RD"     || VERIFY_FAIL=1
+check_offload "$NS_RD"   "ve-RD-RA"     || VERIFY_FAIL=1
+check_offload "$NS_RD"   "ve-RD-SW57C"  || VERIFY_FAIL=1
+
+if [ "$VERIFY_FAIL" -eq 0 ]; then
+    echo "==> offload 检查全部通过 ✓"
+else
+    echo "==> offload 检查存在失败项，校验和分析结果将不可信 ✗" >&2
+    exit 1
+fi
 
 # ------------------------------------------------------------
 # 预期实验现象:

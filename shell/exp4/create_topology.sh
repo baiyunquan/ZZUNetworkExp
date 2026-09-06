@@ -31,14 +31,29 @@ IP_H57C="192.168.57.254/26"
 
 [ "$(id -u)" -eq 0 ] || { echo "[错误] 请使用 root/sudo 执行" >&2; exit 1; }
 
+ns_exists() { ip netns list | grep -qw "$1"; }
+
 offload_off() {
-    ip netns exec "$1" ethtool -K "$2" rx off tx off gso off tso off gro off 2>/dev/null || true
+    # 失败留痕（veth 的 rx off 可能被内核拒绝，属已知限制），offload 状态由 verify 复查
+    if ! ip netns exec "$1" ethtool -K "$2" rx off tx off gso off tso off gro off 2>/dev/null; then
+        echo "[警告] $1.$2 offload 关闭失败（检查 ethtool 是否安装）" >&2
+    fi
 }
 
 do_create() {
+    # 幂等性保护: 若拓扑已存在，先销毁旧拓扑再重建
+    if ns_exists "$NS_H56A" || ns_exists "$NS_SW56A" || ns_exists "$NS_RB" \
+       || ns_exists "$NS_RA" || ns_exists "$NS_RD" || ns_exists "$NS_SW57C" || ns_exists "$NS_H57C"; then
+        echo "==> 检测到已有同名命名空间，先销毁旧拓扑"
+        do_destroy
+    fi
+    # 创建中途失败时回滚，避免留下半成品状态
+    trap 'echo "[错误] 创建失败，回滚已创建的资源" >&2; do_destroy' ERR
+
     echo "==> 创建 7 个网络命名空间"
     for ns in "$NS_H56A" "$NS_SW56A" "$NS_RB" "$NS_RA" "$NS_RD" "$NS_SW57C" "$NS_H57C"; do
         ip netns add "$ns"
+        ip netns exec "$ns" ip link set lo up
     done
 
     echo "==> 创建网桥（交换机）"
@@ -108,13 +123,16 @@ do_create() {
     offload_off "$NS_RD" "$V_RD_RA";   offload_off "$NS_RD" "$V_RD_57C"
 
     echo "==> 拓扑创建完成"
+    trap - ERR
 }
 
 do_verify() {
+    verify_fail=0
     echo "==> 命名空间列表"; ip netns list
     echo "==> 网桥绑定"
-    ip netns exec "$NS_SW56A" bridge link show "$BR_56A"
-    ip netns exec "$NS_SW57C" bridge link show "$BR_57C"
+    # bridge link show 不支持裸设备名过滤（参数被静默忽略），改用 ip link show master
+    ip netns exec "$NS_SW56A" ip link show master "$BR_56A"
+    ip netns exec "$NS_SW57C" ip link show master "$BR_57C"
     echo "==> 各节点地址与路由"
     for ns in "$NS_H56A" "$NS_RB" "$NS_RA" "$NS_RD" "$NS_H57C"; do
         echo "--- $ns ---"
@@ -122,11 +140,25 @@ do_verify() {
         ip netns exec "$ns" ip route
     done
     echo "==> 可达性与转发路径"
-    ip netns exec "$NS_H56A" ping -c 4 192.168.57.254
-    ip netns exec "$NS_H56A" traceroute 192.168.57.254
+    if ip netns exec "$NS_H56A" ping -c 4 192.168.57.254; then
+        echo "    IPv4 跨路由可达 ✓"
+    else
+        echo "    ping 失败 ✗（检查接口 up / IP / 静态路由 / ip_forward）" >&2
+        verify_fail=1
+    fi
+    ip netns exec "$NS_H56A" traceroute 192.168.57.254 || verify_fail=1
+    [ "$verify_fail" -eq 0 ] && echo "==> 验证全部通过 ✓" || { echo "==> 验证存在失败项 ✗" >&2; exit 1; }
 }
 
 do_destroy() {
+    echo "==> 终止命名空间内的残留进程（ncat/tshark），再删除命名空间"
+    for ns in "$NS_H56A" "$NS_SW56A" "$NS_RB" "$NS_RA" "$NS_RD" "$NS_SW57C" "$NS_H57C"; do
+        if ns_exists "$ns"; then
+            pids=$(ip netns pids "$ns" 2>/dev/null || true)
+            [ -n "$pids" ] && kill $pids 2>/dev/null || true
+        fi
+    done
+    sleep 1
     for ns in "$NS_H56A" "$NS_SW56A" "$NS_RB" "$NS_RA" "$NS_RD" "$NS_SW57C" "$NS_H57C"; do
         ip netns del "$ns" 2>/dev/null || true
     done
@@ -147,7 +179,9 @@ esac
 # 预期实验现象:（与实验3一致）
 #   verify: 7 个命名空间；网桥各绑 2 接口；地址/路由与规划一致；
 #     ping -c 4 -> 4 received, 0% packet loss；
-#     traceroute -> 3 跳 RB(192.168.56.1) -> RA(192.168.56.246) -> H57C。
+#     traceroute -> 4 跳: RB(192.168.56.1) -> RA(192.168.56.246)
+#       -> RD(192.168.56.254) -> H57C(192.168.57.254)（TTL=3 的包在 RD
+#       处到期，RD 回 ICMP Time Exceeded，故第 3 跳是 RD）。
 #   注意（指导书原文）: 每次重新执行 create，VETH 接口的 MAC 地址
 #     有可能不同，记录信息时以当次 verify 输出为准。
 # ------------------------------------------------------------

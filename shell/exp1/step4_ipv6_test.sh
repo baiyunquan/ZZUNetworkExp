@@ -14,16 +14,24 @@ PCAP_DIR="${1:-/tmp}"
 PCAP="$PCAP_DIR/exp1_ipv6.pcap"
 
 echo "==> (1) 为两台主机配置 IPv6 ULA 地址"
-ip netns exec "$NS_HA" ip addr add "$IP6_HA" dev "$IF_HA"
-ip netns exec "$NS_HB" ip addr add "$IP6_HB" dev "$IF_HB"
+# 幂等: 地址已存在则跳过；同时确保接口 up（不依赖步骤3是否已执行）
+if ! ip netns exec "$NS_HA" ip -6 addr show dev "$IF_HA" | grep -qw "${IP6_HA%/*}"; then
+    ip netns exec "$NS_HA" ip addr add "$IP6_HA" dev "$IF_HA"
+fi
+if ! ip netns exec "$NS_HB" ip -6 addr show dev "$IF_HB" | grep -qw "${IP6_HB%/*}"; then
+    ip netns exec "$NS_HB" ip addr add "$IP6_HB" dev "$IF_HB"
+fi
+ip netns exec "$NS_HA" ip link set "$IF_HA" up
+ip netns exec "$NS_HB" ip link set "$IF_HB" up
 ip netns exec "$NS_HA" ip -6 addr show "$IF_HA"
 ip netns exec "$NS_HB" ip -6 addr show "$IF_HB"
 
 if command -v tshark >/dev/null 2>&1; then
     echo "==> (2) 启动抓包（tshark 后台抓取 $IF_HA）"
-    ip netns exec "$NS_HA" tshark -i "$IF_HA" -w "$PCAP" &
+    # -a duration: 自动定时停止，避免依赖 sleep 时序导致 pcap 截断
+    ip netns exec "$NS_HA" tshark -i "$IF_HA" -a duration:8 -w "$PCAP" &
     TSHARK_PID=$!
-    sleep 2
+    sleep 1
 else
     echo "==> (2) [跳过] 未安装 tshark。请手动执行: ip netns exec $NS_HA wireshark &"
     TSHARK_PID=""

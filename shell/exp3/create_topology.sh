@@ -40,12 +40,27 @@ IP_H57C="192.168.57.254/26"     # 主机H57C
 
 [ "$(id -u)" -eq 0 ] || { echo "[错误] 请使用 root/sudo 执行" >&2; exit 1; }
 
+ns_exists() { ip netns list | grep -qw "$1"; }
+
 offload_off() {  # 关闭网卡 offload，保证校验和/分片由 CPU 计算
     local ns="$1" ifname="$2"
-    ip netns exec "$ns" ethtool -K "$ifname" rx off tx off gso off tso off gro off 2>/dev/null || true
+    # 不静默吞错: 失败必须留痕（veth 的 rx-checksumming 可能被内核拒绝，属已知限制），
+    # offload 实际状态由 verify 中的 offload 断言复查，避免校验和分析建立在未关基础上
+    if ! ip netns exec "$ns" ethtool -K "$ifname" rx off tx off gso off tso off gro off 2>/dev/null; then
+        echo "[警告] $ns.$ifname offload 关闭失败（检查 ethtool 是否安装、接口名是否正确）" >&2
+    fi
 }
 
 do_create() {
+    # 幂等性保护: 若拓扑已存在，先销毁旧拓扑再重建
+    if ns_exists "$NS_H56A" || ns_exists "$NS_SW56A" || ns_exists "$NS_RB" \
+       || ns_exists "$NS_RA" || ns_exists "$NS_RD" || ns_exists "$NS_SW57C" || ns_exists "$NS_H57C"; then
+        echo "==> 检测到已有同名命名空间，先销毁旧拓扑"
+        do_destroy
+    fi
+    # 创建中途失败时回滚，避免留下半成品状态
+    trap 'echo "[错误] 创建失败，回滚已创建的资源" >&2; do_destroy' ERR
+
     echo "==> 创建 7 个网络命名空间"
     for ns in "$NS_H56A" "$NS_SW56A" "$NS_RB" "$NS_RA" "$NS_RD" "$NS_SW57C" "$NS_H57C"; do
         ip netns add "$ns"
@@ -130,14 +145,23 @@ do_create() {
     offload_off "$NS_RD"   "$V_RD_RA";   offload_off "$NS_RD" "$V_RD_57C"
 
     echo "==> 拓扑创建完成"
+    trap - ERR
+}
+
+# 检查一个接口的 offload 是否已关闭，全部 off 返回 0
+offload_is_off() {
+    local ns="$1" ifname="$2"
+    [ "$(ip netns exec "$ns" ethtool -k "$ifname" 2>/dev/null \
+        | grep -cE '^(rx-checksumming|tx-checksumming|generic-segmentation-offload|generic-receive-offload): off$')" -eq 4 ]
 }
 
 do_verify() {
     echo "==> 命名空间列表"
     ip netns list
     echo "==> 交换机网桥绑定"
-    ip netns exec "$NS_SW56A" bridge link show "$BR_56A"
-    ip netns exec "$NS_SW57C" bridge link show "$BR_57C"
+    # bridge link show 不支持裸设备名过滤（参数被静默忽略），改用 ip link show master
+    ip netns exec "$NS_SW56A" ip link show master "$BR_56A"
+    ip netns exec "$NS_SW57C" ip link show master "$BR_57C"
     echo "==> 各节点地址与路由"
     for ns in "$NS_H56A" "$NS_RB" "$NS_RA" "$NS_RD" "$NS_H57C"; do
         echo "--- $ns ---"
@@ -148,13 +172,40 @@ do_verify() {
     for ns in "$NS_RB" "$NS_RA" "$NS_RD"; do
         echo "    $ns ip_forward=$(ip netns exec "$ns" sysctl -n net.ipv4.ip_forward)"
     done
+    echo "==> offload 状态断言（4 项应全为 off）"
+    verify_fail=0
+    for spec in \
+        "$NS_H56A $V_H56A" "$NS_H57C $V_H57C" \
+        "$NS_RB ve-RB-SW56A" "$NS_RB ve-RB-RA" "$NS_RA ve-RA-RB" "$NS_RA ve-RA-RD" \
+        "$NS_RD ve-RD-RA" "$NS_RD ve-RD-SW57C"; do
+        if offload_is_off "${spec%% *}" "${spec#* }"; then
+            echo "    ${spec} offload=off ✓"
+        else
+            echo "    ${spec} offload 未全部关闭 ✗（校验和分析结果将不可信）" >&2
+            verify_fail=1
+        fi
+    done
     echo "==> 可达性测试（H56A -> H57C）"
-    ip netns exec "$NS_H56A" ping -c 4 192.168.57.254
+    if ip netns exec "$NS_H56A" ping -c 4 192.168.57.254; then
+        echo "    IPv4 跨路由可达 ✓"
+    else
+        echo "    ping 失败 ✗（检查接口 up / IP / 静态路由 / ip_forward）" >&2
+        verify_fail=1
+    fi
     echo "==> 转发路径（H56A -> H57C）"
-    ip netns exec "$NS_H56A" traceroute 192.168.57.254
+    ip netns exec "$NS_H56A" traceroute 192.168.57.254 || verify_fail=1
+    [ "$verify_fail" -eq 0 ] && echo "==> 验证全部通过 ✓" || { echo "==> 验证存在失败项 ✗" >&2; exit 1; }
 }
 
 do_destroy() {
+    echo "==> 终止命名空间内的残留进程（ncat/tshark），再删除命名空间"
+    for ns in "$NS_H56A" "$NS_SW56A" "$NS_RB" "$NS_RA" "$NS_RD" "$NS_SW57C" "$NS_H57C"; do
+        if ns_exists "$ns"; then
+            pids=$(ip netns pids "$ns" 2>/dev/null || true)
+            [ -n "$pids" ] && kill $pids 2>/dev/null || true
+        fi
+    done
+    sleep 1
     echo "==> 删除全部命名空间"
     for ns in "$NS_H56A" "$NS_SW56A" "$NS_RB" "$NS_RA" "$NS_RD" "$NS_SW57C" "$NS_H57C"; do
         ip netns del "$ns" 2>/dev/null || true
@@ -185,8 +236,10 @@ esac
 #     4) 三台路由器 ip_forward=1；
 #     5) ping -c 4 输出 "4 packets transmitted, 4 received, 0% packet loss"，
 #        说明跨三个路由器端到端可达；
-#     6) traceroute 输出 3 跳: 192.168.56.1(RB) -> 192.168.56.246(RA)
-#        -> 192.168.57.254(H57C)，与拓扑路径 RB-RA-RD 一致。
+#     6) traceroute 输出 4 跳: 192.168.56.1(RB) -> 192.168.56.246(RA)
+#        -> RD(192.168.56.254) -> 192.168.57.254(H57C)，
+#        与拓扑路径 H56A-RB-RA-RD-H57C 一致（TTL=3 的包在 RD 处到期，
+#        RD 回 ICMP Time Exceeded，故第 3 跳是 RD，第 4 跳才是 H57C）。
 #   destroy:
 #     全部命名空间与 VETH 清理干净，系统恢复初始状态。
 # ------------------------------------------------------------

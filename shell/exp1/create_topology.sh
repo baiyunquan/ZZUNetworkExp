@@ -20,7 +20,17 @@ IP6_HA="fd00::1:1/64";   IP6_HB="fd00::1:2/64"
 
 [ "$(id -u)" -eq 0 ] || { echo "[错误] 请使用 root/sudo 执行" >&2; exit 1; }
 
+ns_exists() { ip netns list | grep -qw "$1"; }
+
 do_create() {
+    # 幂等性保护: 若拓扑已存在，先销毁旧拓扑再重建
+    if ns_exists "$NS_HA" || ns_exists "$NS_HB" || ns_exists "$NS_SWA"; then
+        echo "==> 检测到已有同名命名空间，先销毁旧拓扑"
+        do_destroy
+    fi
+    # 创建中途失败时回滚，避免留下半成品状态
+    trap 'echo "[错误] 创建失败，回滚已创建的资源" >&2; do_destroy' ERR
+
     echo "==> 创建网络命名空间"
     ip netns add "$NS_HA"
     ip netns add "$NS_HB"
@@ -53,6 +63,7 @@ do_create() {
     ip netns exec "$NS_HB" ip link set "$VETH_HB" up
 
     echo "==> 拓扑创建完成，执行 verify 子命令可验证"
+    trap - ERR
 }
 
 do_verify() {
@@ -63,17 +74,35 @@ do_verify() {
         ip netns exec "$ns" ip link show
     done
     echo "==> 交换机网桥绑定状态"
-    ip netns exec "$NS_SWA" bridge link show "$BR"
+    ip netns exec "$NS_SWA" bridge link show dev "$BR"
     for ns in "$NS_HA" "$NS_HB"; do
         echo "==> $ns 的 IPv4/IPv6 地址配置"
         ip netns exec "$ns" ip addr
     done
     echo "==> 连通性测试"
-    ip netns exec "$NS_HA" ping -c 2 "${IP_HB%/*}"   && echo "IPv4 连通 ✓"
-    ip netns exec "$NS_HA" ping -c 2 "${IP6_HB%/*}"  && echo "IPv6 连通 ✓"
+    # 注意: 不能写成 `ping && echo ✓`，set -e 下 ping 失败会静默中断脚本
+    if ip netns exec "$NS_HA" ping -c 2 "${IP_HB%/*}"; then
+        echo "IPv4 连通 ✓"
+    else
+        echo "IPv4 不通 ✗（检查接口 up / IP 配置 / 网桥绑定）" >&2
+    fi
+    if ip netns exec "$NS_HA" ping -c 2 "${IP6_HB%/*}"; then
+        echo "IPv6 连通 ✓"
+    else
+        echo "IPv6 不通 ✗（检查 IPv6 地址前缀 / 接口 up）" >&2
+    fi
 }
 
 do_destroy() {
+    echo "==> 终止命名空间内的残留进程（如 tshark），再删除命名空间"
+    for ns in "$NS_HA" "$NS_HB" "$NS_SWA"; do
+        if ns_exists "$ns"; then
+            # 命名空间被存活进程持有时 netns del 无法真正销毁，先 kill
+            pids=$(ip netns pids "$ns" 2>/dev/null || true)
+            [ -n "$pids" ] && kill $pids 2>/dev/null || true
+        fi
+    done
+    sleep 1
     echo "==> 删除命名空间（其内 veth/bridge 随之自动销毁）"
     ip netns del "$NS_HA"  2>/dev/null || true
     ip netns del "$NS_HB"  2>/dev/null || true
@@ -99,7 +128,7 @@ esac
 #     1) ip netns list 显示 HA、HB、SWA 三个命名空间；
 #     2) HA 内可见 ve-ha-swa，HB 内可见 ve-hb-swa，
 #        SWA 内可见 br-swa、ve-swa-ha、ve-swa-hb，且状态 UP；
-#     3) bridge link show br-swa 列出两个已绑定的 VETH 接口；
+#     3) bridge link show dev br-swa 列出两个已绑定的 VETH 接口；
 #     4) HA/HB 的 ip addr 同时显示 IPv4（192.168.50.x/24）与
 #        IPv6（fd00::1:x/64 + fe80 链路本地）地址；
 #     5) 两次 ping 各输出 "2 packets transmitted, 2 received, 0% packet loss"，

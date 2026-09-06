@@ -12,7 +12,11 @@ echo "==> (1) 用户权限"
 
 echo "==> (2) 软件工具"
 ip -V || { echo "    [错误] ip 不可用" >&2; exit 1; }
-wireshark --version 2>/dev/null | head -1 || echo "    [警告] Wireshark 未安装"
+if command -v wireshark >/dev/null; then
+    wireshark --version 2>/dev/null | head -1
+else
+    echo "    [警告] Wireshark 未安装"
+fi
 command -v tshark >/dev/null && echo "    tshark ✓（命令行抓包/分析）" || echo "    [警告] tshark 未安装"
 
 echo "==> (3) 浏览器"
@@ -28,8 +32,20 @@ echo "    完整对应关系以 Firefox about:networking#dnslookuptool 查询结
 echo "==> (5) 公网连通性测试"
 IFACE=$(ip route get 1.1.1.1 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2}')
 echo "    默认出口接口: ${IFACE:-未知}（Wireshark 抓包选它）"
-curl -4 -sI -m 10 "https://$SITE" | head -1 && echo "    IPv4 HTTPS 可达 ✓" || echo "    IPv4 HTTPS 不可达 ✗"
-curl -6 -sI -m 10 "https://$SITE" | head -1 && echo "    IPv6 HTTPS 可达 ✓" || echo "    IPv6 HTTPS 不可达（仅 IPv4 单栈环境，属正常）"
+# 注意：不能用 "curl ... | head -1 && ..." 判断连通性 —— 管道退出码取自 head（恒为0），
+# 必须直接检查 curl 自身的退出码与 HTTP 状态码
+code4=$(curl -4 -s -o /dev/null -w '%{http_code}' -m 10 "https://$SITE" 2>/dev/null)
+if [ -n "$code4" ] && [ "$code4" != "000" ]; then
+    echo "    IPv4 HTTPS 可达 ✓ (HTTP $code4)"
+else
+    echo "    IPv4 HTTPS 不可达 ✗"
+fi
+code6=$(curl -6 -s -o /dev/null -w '%{http_code}' -m 10 "https://$SITE" 2>/dev/null)
+if [ -n "$code6" ] && [ "$code6" != "000" ]; then
+    echo "    IPv6 HTTPS 可达 ✓ (HTTP $code6)"
+else
+    echo "    IPv6 HTTPS 不可达（仅 IPv4 单栈环境，属正常）"
+fi
 
 # ------------------------------------------------------------
 # 预期实验现象:

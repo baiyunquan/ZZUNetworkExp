@@ -8,18 +8,16 @@
 set -u
 
 NS_HA="HA"; NS_HB="HB"; NS_SWA="SWA"
-IF_HA="ve-ha-swa"; IF_HB="ve-hb-swa"
-IF_SWA_HA="ve-swa-ha"; IF_SWA_HB="ve-swa-hb"
 
 echo "================ 实验1 拓扑信息记录表 ================"
 
 for ns in "$NS_HA" "$NS_HB" "$NS_SWA"; do
     echo ""
     echo "### 命名空间: $ns"
-    ip netns exec "$ns" ip -o link show 2>/dev/null | grep -v " lo " | while IFS= read -r line; do
+    ip netns exec "$ns" ip -o link show 2>/dev/null | grep -v ': lo:' | while IFS= read -r line; do
         ifname=$(echo "$line" | cut -d: -f2 | tr -d ' ')
         mac=$(echo "$line" | grep -oE 'link/ether [0-9a-f:]+' | awk '{print $2}')
-        peer=$(echo "$line" | grep -oE '@if[0-9]+' | tr -d '@if')
+        peer=$(echo "$line" | sed -n 's/.*@if\([0-9]\+\).*/\1/p')
         echo "  接口: $ifname"
         echo "    MAC 地址: ${mac:-无（网桥/未配）}"
         if [ -n "$peer" ]; then

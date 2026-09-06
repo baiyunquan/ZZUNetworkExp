@@ -15,12 +15,10 @@ for cmd in wireshark tshark ncat traceroute ethtool; do
     if command -v "$cmd" >/dev/null; then
         echo "    $cmd ✓"
     else
-        echo "    [错误] $cmd 未安装（openEuler: dnf install nmap traceroute ethtool / Arch: pacman -S nmap ethtool）" >&2
+        echo "    [错误] $cmd 未安装（openEuler: dnf install wireshark nmap traceroute ethtool / Arch: pacman -S wireshark-cli nmap traceroute ethtool；ncat/nping 属 nmap 包）" >&2
         MISS=1
     fi
 done
-[ -n "${MISS:-}" ] && exit 1
-
 echo "==> (3) 检查防火墙状态"
 if systemctl is-active firewalld >/dev/null 2>&1; then
     echo "    firewalld 运行中，正在关闭（避免干扰虚拟路由器重组 IP 分片）..."
@@ -31,8 +29,23 @@ else
 fi
 
 echo "==> (4) 检查内核虚拟网络能力"
-modinfo veth   >/dev/null 2>&1 && echo "    veth ✓"
-modinfo bridge >/dev/null 2>&1 && echo "    bridge ✓"
+# modinfo 只证明模块文件存在（内建模块或未装 kernel-devel 时会误报），
+# 失败计入 MISS，成功也不代表可加载——真正的验证在 create_topology.sh create
+if modinfo veth >/dev/null 2>&1; then
+    echo "    veth 模块 ✓"
+else
+    echo "    [警告] veth 模块元数据不可读（可能为内建或缺 kernel-devel，若 create 失败需回查）" >&2
+    MISS=1
+fi
+if modinfo bridge >/dev/null 2>&1; then
+    echo "    bridge 模块 ✓"
+else
+    echo "    [警告] bridge 模块元数据不可读（内建或缺 kernel-devel，需回查）" >&2
+    MISS=1
+fi
+
+[ -n "${MISS:-}" ] && { echo "==> 环境检查存在失败项，先修复再进入步骤2 ✗" >&2; exit 1; }
+echo "==> 环境检查全部通过 ✓"
 
 # ------------------------------------------------------------
 # 预期实验现象:
